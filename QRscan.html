@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Secure QR Scanner</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        .video-scan-border {
+            position: relative;
+            overflow: hidden;
+            border-radius: 1rem;
+        }
+        .scan-line {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 3px;
+            background: linear-gradient(90deg, transparent, #34d399, transparent);
+            animation: scanning 2.5s infinite linear;
+            box-shadow: 0 0 10px #34d399, 0 0 20px #34d399;
+        }
+        @keyframes scanning {
+            0% { top: 0; }
+            100% { top: 100%; }
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex items-center justify-center min-h-screen p-4">
+
+    <div class="w-full max-w-2xl mx-auto bg-gray-800 rounded-2xl shadow-2xl p-6 md:p-8 space-y-6">
+        <div class="text-center">
+            <h1 class="text-3xl font-bold text-emerald-400">Secure QR Scanner</h1>
+            <p class="text-gray-400 mt-2">
+                This scanner is designed to only accept QR codes from a projector, denying scans from digital screens.
+            </p>
+        </div>
+
+        <!-- Camera View and Status -->
+        <div id="loadingMessage" class="text-center p-4 bg-gray-700 rounded-lg">
+            <p>🎥 Requesting camera access...</p>
+        </div>
+
+        <div id="scannerContainer" class="hidden w-full aspect-video bg-gray-900 rounded-xl shadow-lg video-scan-border">
+             <video id="video" playsinline class="w-full h-full object-cover rounded-xl"></video>
+             <div class="scan-line"></div>
+        </div>
+        <canvas id="canvas" class="hidden"></canvas>
+
+        <!-- Result Display -->
+        <div id="resultContainer" class="bg-gray-700 p-5 rounded-lg text-center space-y-3">
+            <h2 class="text-lg font-semibold text-gray-300">Scan Result</h2>
+            <div id="output" class="p-4 rounded-md text-lg break-all font-mono">
+                <span class="text-gray-500">Awaiting a valid scan...</span>
+            </div>
+             <p id="scan-type" class="text-sm font-medium"></p>
+        </div>
+
+        <!-- Explanation -->
+        <div class="text-xs text-center text-gray-500 pt-4 border-t border-gray-700">
+             <p><strong class="text-gray-400">How it works:</strong> This tool analyzes the video feed for patterns unique to digital screens (like pixel grids and direct light emission). Projections reflect light differently and are permitted, while scans from phones or monitors are blocked.</p>
+        </div>
+
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvasElement = document.getElementById('canvas');
+        const canvas = canvasElement.getContext('2d');
+        const loadingMessage = document.getElementById('loadingMessage');
+        const outputContainer = document.getElementById('output');
+        const scanTypeElement = document.getElementById('scan-type');
+        const scannerContainer = document.getElementById('scannerContainer');
+
+        let isScanningPaused = false;
+
+        // --- Liveness Detection Logic ---
+        // This is a heuristic approach to detect screens. It's not foolproof but acts as a strong deterrent.
+        function performLivenessCheck(imageData, qrCode) {
+            const {
+                topLeftCorner,
+                topRightCorner,
+                bottomLeftCorner,
+                bottomRightCorner
+            } = qrCode.location;
+
+            // Define the bounding box for the QR code
+            const minX = Math.floor(Math.min(topLeftCorner.x, bottomLeftCorner.x));
+            const maxX = Math.ceil(Math.max(topRightCorner.x, bottomRightCorner.x));
+            const minY = Math.floor(Math.min(topLeftCorner.y, topRightCorner.y));
+            const maxY = Math.ceil(Math.max(bottomLeftCorner.y, bottomRightCorner.y));
+            
+            let highContrastEdges = 0;
+            let overlyBrightPixels = 0;
+            let totalPixels = 0;
+
+            const BRIGHTNESS_THRESHOLD = 230; // Screens emit light, making pixels unnaturally bright. Projections reflect light, so they are dimmer.
+            const CONTRAST_THRESHOLD = 80;   // Digital screens have very sharp pixel edges. This detects the high-frequency patterns of a pixel grid (Moiré patterns).
+
+            for (let y = minY; y < maxY; y++) {
+                for (let x = minX; x < maxX; x++) {
+                    totalPixels++;
+                    const i = (y * imageData.width + x) * 4;
+                    const r = imageData.data[i];
+                    const g = imageData.data[i + 1];
+                    const b = imageData.data[i + 2];
+                    
+                    const brightness = (r + g + b) / 3;
+
+                    // 1. Check for overly bright pixels
+                    if (brightness > BRIGHTNESS_THRESHOLD) {
+                        overlyBrightPixels++;
+                    }
+
+                    // 2. Check for high contrast edges (simple moiré pattern detection)
+                    if (x < maxX - 1) {
+                       const i_next = (y * imageData.width + (x + 1)) * 4;
+                       const r_next = imageData.data[i_next];
+                       const g_next = imageData.data[i_next + 1];
+                       const b_next = imageData.data[i_next + 2];
+                       const brightness_next = (r_next + g_next + b_next) / 3;
+                       
+                       if (Math.abs(brightness - brightness_next) > CONTRAST_THRESHOLD) {
+                           highContrastEdges++;
+                       }
+                    }
+                }
+            }
+
+            if (totalPixels === 0) return { isLive: true, reason: 'N/A' }; // Avoid division by zero
+
+            const brightPixelRatio = overlyBrightPixels / totalPixels;
+            const highContrastRatio = highContrastEdges / totalPixels;
+            
+            console.log(`Liveness Check: Brightness Ratio=${brightPixelRatio.toFixed(3)}, Contrast Ratio=${highContrastRatio.toFixed(3)}`);
+
+            // Heuristic decision: if a significant portion of pixels is either too bright or shows screen-like patterns, reject it.
+            // These thresholds are tuned to be sensitive to screens but permissive for projections.
+            if (brightPixelRatio > 0.01) { // More than 1% of pixels are extremely bright (indicative of a direct light source)
+                 return { isLive: false, reason: 'Direct light source detected.' };
+            }
+            if (highContrastRatio > 0.04) { // More than 4% of pixels have sharp edges suggesting a screen grid
+                 return { isLive: false, reason: 'Screen pixel grid pattern detected.' };
+            }
+
+            return { isLive: true, reason: 'Looks like a projection or physical scan.' };
+        }
+
+
+        // --- Main Scan Loop ---
+        function tick() {
+            if (isScanningPaused) {
+                requestAnimationFrame(tick);
+                return;
+            }
+
+            if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                loadingMessage.hidden = true;
+                scannerContainer.classList.remove('hidden');
+
+                canvasElement.height = video.videoHeight;
+                canvasElement.width = video.videoWidth;
+                canvas.drawImage(video, 0, 0, canvasElement.width, canvasElement.height);
+                const imageData = canvas.getImageData(0, 0, canvasElement.width, canvasElement.height);
+                
+                const code = jsQR(imageData.data, imageData.width, imageData.height, {
+                    inversionAttempts: "dontInvert",
+                });
+
+                if (code) {
+                    const { isLive, reason } = performLivenessCheck(imageData, code);
+                    
+                    isScanningPaused = true; // Pause scanning to show result
+
+                    if (isLive) {
+                        outputContainer.textContent = code.data;
+                        outputContainer.className = 'p-4 rounded-md text-lg break-all font-mono bg-emerald-900/50 text-emerald-300';
+                        scanTypeElement.textContent = `✅ VERIFIED: ${reason}`;
+                        scanTypeElement.className = 'text-sm font-medium text-emerald-400';
+                    } else {
+                        outputContainer.textContent = "Scan Rejected";
+                        outputContainer.className = 'p-4 rounded-md text-lg break-all font-mono bg-red-900/50 text-red-300';
+                        scanTypeElement.textContent = `❌ SCREEN DETECTED: ${reason}`;
+                        scanTypeElement.className = 'text-sm font-medium text-red-400';
+                    }
+
+                    // Resume scanning after a delay
+                    setTimeout(() => {
+                        isScanningPaused = false;
+                        if (!isLive) {
+                             outputContainer.innerHTML = `<span class="text-gray-500">Awaiting a valid scan...</span>`;
+                             outputContainer.className = 'p-4 rounded-md text-lg break-all font-mono';
+                             scanTypeElement.textContent = '';
+                        }
+                    }, 3000);
+                }
+            }
+            requestAnimationFrame(tick);
+        }
+
+        // --- Initialize Camera ---
+        async function initCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: "environment"
+                    }
+                });
+                video.srcObject = stream;
+                video.setAttribute("playsinline", true); // Required to work on iOS
+                video.play();
+                requestAnimationFrame(tick);
+            } catch (err) {
+                loadingMessage.textContent = "🚫 Camera Error: " + err.message;
+                console.error("Camera access error:", err);
+            }
+        }
+
+        initCamera();
+    </script>
+</body>
+</html>
+
